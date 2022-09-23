@@ -7,6 +7,15 @@
 #include <biped_wbms_core/BipedWbmsCoreConfig.h>
 #include <cpp_filters/IIRFilter.h>
 #include <Eigen/Eigen>
+#include <std_msgs/Bool.h>
+#include <geometry_msgs/Twist.h>
+#include <auto_stabilizer/OpenHRP_AutoStabilizerService_goVelocity.h>
+#include <auto_stabilizer/OpenHRP_AutoStabilizerService_goStop.h>
+#include <auto_stabilizer/OpenHRP_AutoStabilizerService_setFootSteps.h>
+#include <auto_stabilizer/OpenHRP_AutoStabilizerService_setFootStepsWithParam.h>
+#include <auto_stabilizer/OpenHRP_AutoStabilizerService_waitFootSteps.h>
+#include <auto_stabilizer/OpenHRP_AutoStabilizerService_getAutoStabilizerParam.h>
+#include <auto_stabilizer/OpenHRP_AutoStabilizerService_setAutoStabilizerParam.h>
 
 /*
   <独立thread 500Hz>
@@ -16,39 +25,55 @@
   slave_wrench[0:2]は、isManualControlModeで無いなら、0にする
 
   master_poseをそのまま流す.
-  master_poseは、(STATE_BUTTON1 or STATE_BUTTON2)なら、最後にSTATE_NORMALだったときの値で止める. STATE_NORMALに戻ったら、滑らかに補間する.
+  master_poseは、(STATE_STEPBUTTON or STATE_LIFTBUTTON)なら、最後にSTATE_NORMALだったときの値で止める. STATE_NORMALに戻ったら、滑らかに補間する.
 
 
-  <thread>
+  <thread> (サービスコールには少し時間がかかるのでスレッドを分けている)
   isManualControlModeかをサービスコールして取得し続ける
 
 
-  <thread>
+  <thread> (サービスコールには少し時間がかかるのでスレッドを分けている)
   button1,2をtopicから取得し続ける
   cmd_vel1, 2をtopicから取得し続ける
   以下の状態遷移
   STATE_NORMAL
-  STATE_BUTTON1_RLEG (STATE_NORMAL時に(button1がtrue)になったら至る)
-      遷移時、master_poseを停止, 両足isReferenceFrame=true
+  STATE_STEPBUTTON_RLEG (STATE_NORMAL時に(button1がtrue)になったら至る)
+      遷移時、master_poseを停止, その足isReferenceFrame=false, 反対足isReferenceFrame=true
     (button1がfalse)になったら、STATE_NORMALへ遷移
       遷移時、master_poseの補間器開始, setFootSteps(swingEnd=false).
-  STATE_BUTTON2_RLEG (STATE_NORMAL時に(button2がtrue)になったら至る)
+  STATE_LIFTBUTTON_RLEG (STATE_NORMAL時に(button2がtrue)になったら至る)
       遷移時、master_poseを停止, その足isReferenceFrame=false, 反対足isReferenceFrame=true. handFixMode=true
     (button2がfalse)になったら、STATE_NORMALへ遷移
       遷移時、master_poseの補間器開始, setFootSteps(swingEnd=true), waitFootSteps, isManualControlMode=true
-  STATE_BUTTON1_LLEG
-  STATE_BUTTON2_LLEG
-  STATE_CMD_VEL1 (STATE_NORMAL時に(cmd_vel1が非ゼロになったら至る)
-      遷移時、goVelocityを呼ぶ. handFixMode=false
+  STATE_STEPBUTTON_LLEG
+  STATE_LIFTBUTTON_LLEG
+  STATE_CMDVEL (STATE_NORMAL時に(cmd_vel1が非ゼロになったら至る)
+      遷移時、handFixMode=false
       以後、goVelocityを呼び続ける
     (cmd_vel1がゼロ)になったら、STATE_NORMALに遷移
       遷移時、goStopを呼ぶ
-  STATE_CMD_VEL2 (STATE_NORMAL時に(cmd_vel2が非ゼロになったら至る)
-      遷移時、goVelocityを呼ぶ. handFixMode=true
+  STATE_HANDFIXEDCMDVEL (STATE_NORMAL時に(cmd_vel2が非ゼロになったら至る)
+      遷移時handFixMode=true
       以後、goVelocityを呼び続ける
     (cmd_vel2がゼロ)になったら、STATE_NORMALに遷移
       遷移時、goStopを呼ぶ
 */
+
+#define RLEG 0
+#define LLEG 0
+#define NUM_LEGS 2
+
+auto_stabilizer::OpenHRP_AutoStabilizerService_Footstep poseMsgToIdl(const geometry_msgs::Pose& msg){
+  auto_stabilizer::OpenHRP_AutoStabilizerService_Footstep ret;
+  ret.pos[0] = msg.position.x;
+  ret.pos[1] = msg.position.y;
+  ret.pos[2] = msg.position.z;
+  ret.rot[0] = msg.orientation.w;
+  ret.rot[1] = msg.orientation.x;
+  ret.rot[2] = msg.orientation.y;
+  ret.rot[3] = msg.orientation.z;
+  return ret;
+}
 
 class BipedWbmsCore {
 public:
@@ -74,6 +99,15 @@ public:
 
         this->config_ = config_in;
       }); //setCallbackの中でcallbackが呼ばれる
+
+    this->goVelocityClient_ = this->nh_.serviceClient<auto_stabilizer::OpenHRP_AutoStabilizerService_goVelocity>("AutoStabilizerServiceROSBridge/goVelocity");
+    this->goStopClient_ = this->nh_.serviceClient<auto_stabilizer::OpenHRP_AutoStabilizerService_goStop>("AutoStabilizerServiceROSBridge/goStop");
+    this->setFootStepsClient_ = this->nh_.serviceClient<auto_stabilizer::OpenHRP_AutoStabilizerService_setFootSteps>("AutoStabilizerServiceROSBridge/setFootSteps");
+    this->setFootStepsWithParamClient_ = this->nh_.serviceClient<auto_stabilizer::OpenHRP_AutoStabilizerService_setFootStepsWithParam>("AutoStabilizerServiceROSBridge/setFootStepsWithParam");
+    this->waitFootStepsClient_ = this->nh_.serviceClient<auto_stabilizer::OpenHRP_AutoStabilizerService_waitFootSteps>("AutoStabilizerServiceROSBridge/waitFootSteps");
+    this->getAutoStabilizerParamClient_ = this->nh_.serviceClient<auto_stabilizer::OpenHRP_AutoStabilizerService_getAutoStabilizerParam>("AutoStabilizerServiceROSBridge/getAutoStabilizerParam");
+    this->setAutoStabilizerParamClient_ = this->nh_.serviceClient<auto_stabilizer::OpenHRP_AutoStabilizerService_setAutoStabilizerParam>("AutoStabilizerServiceROSBridge/setAutoStabilizerParam");
+
 
     for(int i=0;i<endeffectors.size();i++){
       ros::SubscribeOptions masterPoseSubOption = ros::SubscribeOptions::create<geometry_msgs::PoseStamped>
@@ -136,6 +170,72 @@ public:
     this->poseWrenchTimer_ = this->nh_.createTimer(poseWrenchTimerOption);
     this->poseWrenchSpinner_ = std::make_shared<ros::AsyncSpinner>(1,&(poseWrenchCallbackQueue_));
     this->poseWrenchSpinner_->start();
+
+    for(int i=0;i<NUM_LEGS;i++){
+      ros::SubscribeOptions stepButtonSubOption = ros::SubscribeOptions::create<std_msgs::Bool>
+        ("step_" + endeffectors[i] + "_button",
+         1,
+         [&,i](const std_msgs::Bool::ConstPtr& msg){this->stepButton_[i]=msg;},
+         ros::VoidPtr(),
+         &(this->footstepCallbackQueue_)
+         );
+      this->stepButtonSub_.push_back(this->nh_.subscribe(stepButtonSubOption));
+      std_msgs::Bool* msg = new std_msgs::Bool();
+      msg->data = false;
+      this->stepButton_.emplace_back(msg);
+    }
+
+    for(int i=0;i<NUM_LEGS;i++){
+      ros::SubscribeOptions liftButtonSubOption = ros::SubscribeOptions::create<std_msgs::Bool>
+        ("lift_" + endeffectors[i] + "_button",
+         1,
+         [&,i](const std_msgs::Bool::ConstPtr& msg){this->liftButton_[i]=msg;},
+         ros::VoidPtr(),
+         &(this->footstepCallbackQueue_)
+         );
+      this->liftButtonSub_.push_back(this->nh_.subscribe(liftButtonSubOption));
+      std_msgs::Bool* msg = new std_msgs::Bool();
+      msg->data = false;
+      this->liftButton_.emplace_back(msg);
+    }
+
+    {
+      ros::SubscribeOptions cmdVelSubOption = ros::SubscribeOptions::create<geometry_msgs::Twist>
+        ("cmd_vel",
+         1,
+         [&](const geometry_msgs::Twist::ConstPtr& msg){this->cmdVel_=msg;},
+         ros::VoidPtr(),
+         &(this->footstepCallbackQueue_)
+         );
+      this->cmdVelSub_ = this->nh_.subscribe(cmdVelSubOption);
+      geometry_msgs::Twist* msg = new geometry_msgs::Twist();
+      msg->linear.x = msg->linear.y = msg->linear.z = 0.0;
+      msg->angular.x = msg->angular.y = msg->angular.z = 0.0;
+      this->cmdVel_ = geometry_msgs::Twist::ConstPtr(msg);
+    }
+
+    {
+      ros::SubscribeOptions handFixedCmdVelSubOption = ros::SubscribeOptions::create<geometry_msgs::Twist>
+        ("hand_fixed_cmd_vel",
+         1,
+         [&](const geometry_msgs::Twist::ConstPtr& msg){this->handFixedCmdVel_=msg;},
+         ros::VoidPtr(),
+         &(this->footstepCallbackQueue_)
+         );
+      this->handFixedCmdVelSub_ = this->nh_.subscribe(handFixedCmdVelSubOption);
+      geometry_msgs::Twist* msg = new geometry_msgs::Twist();
+      msg->linear.x = msg->linear.y = msg->linear.z = 0.0;
+      msg->angular.x = msg->angular.y = msg->angular.z = 0.0;
+      this->handFixedCmdVel_ = geometry_msgs::Twist::ConstPtr(msg);
+    }
+
+    ros::TimerOptions footstepTimerOption(ros::Duration(1.0/this->config_.rate * 10.0),
+                                          [&](const ros::TimerEvent& event){this->footstepTimerCallBack(event);},
+                                          &(this->footstepCallbackQueue_));
+    this->footstepTimer_ = this->nh_.createTimer(footstepTimerOption);
+    this->footstepSpinner_ = std::make_shared<ros::AsyncSpinner>(1,&(footstepCallbackQueue_));
+    this->footstepSpinner_->start();
+
   }
 protected:
   void poseWrenchTimerCallBack(const ros::TimerEvent& event){
@@ -167,7 +267,268 @@ protected:
       msg.wrench.torque.z = w_shaped[5];
       this->slaveWrenchPub_[i].publish(msg);
     }
- }
+  }
+
+  void footstepTimerCallBack(const ros::TimerEvent& event){
+    if(this->state_ == STATE_NORMAL){
+      if((std::abs(this->cmdVel_->linear.x) > 0.05) || (std::abs(this->cmdVel_->linear.y) > 0.05) || (std::abs(this->cmdVel_->angular.z) > 0.05)){
+        this->state_ = STATE_CMDVEL;
+      }else if((std::abs(this->handFixedCmdVel_->linear.x) > 0.05) || (std::abs(this->handFixedCmdVel_->linear.y) > 0.05) || (std::abs(this->handFixedCmdVel_->angular.z) > 0.05)){
+        this->state_ = STATE_HANDFIXED_CMDVEL;
+      }else if(this->stepButton_[RLEG]->data){
+        this->state_ = STATE_STEP_BUTTON_RLEG;
+        {
+          auto_stabilizer::OpenHRP_AutoStabilizerService_getAutoStabilizerParam getSrv;
+          if(!this->getAutoStabilizerParamClient_.call(getSrv)){
+            ROS_ERROR("failed to call service getAutoStabilizerParam");
+          }else{
+            if(getSrv.response.i_param.reference_frame[RLEG] != false || getSrv.response.i_param.reference_frame[LLEG] != true){
+              auto_stabilizer::OpenHRP_AutoStabilizerService_setAutoStabilizerParam setSrv;
+              setSrv.request.i_param = getSrv.response.i_param;
+              setSrv.request.i_param.reference_frame[RLEG] = false;
+              setSrv.request.i_param.reference_frame[LLEG] = true;
+              if(!this->setAutoStabilizerParamClient_.call(setSrv)){
+                ROS_ERROR("failed to call service setAutoStabilizerParam");
+              }
+            }
+          }
+        }
+      }else if(this->stepButton_[LLEG]->data){
+        this->state_ = STATE_STEP_BUTTON_LLEG;
+        {
+          auto_stabilizer::OpenHRP_AutoStabilizerService_getAutoStabilizerParam getSrv;
+          if(!this->getAutoStabilizerParamClient_.call(getSrv)){
+            ROS_ERROR("failed to call service getAutoStabilizerParam");
+          }else{
+            if(getSrv.response.i_param.reference_frame[RLEG] != true || getSrv.response.i_param.reference_frame[LLEG] != false){
+              auto_stabilizer::OpenHRP_AutoStabilizerService_setAutoStabilizerParam setSrv;
+              setSrv.request.i_param = getSrv.response.i_param;
+              setSrv.request.i_param.reference_frame[RLEG] = true;
+              setSrv.request.i_param.reference_frame[LLEG] = false;
+              if(!this->setAutoStabilizerParamClient_.call(setSrv)){
+                ROS_ERROR("failed to call service setAutoStabilizerParam");
+              }
+            }
+          }
+        }
+      }else if(this->liftButton_[RLEG]->data){
+        this->state_ = STATE_LIFT_BUTTON_RLEG;
+        {
+          auto_stabilizer::OpenHRP_AutoStabilizerService_getAutoStabilizerParam getSrv;
+          if(!this->getAutoStabilizerParamClient_.call(getSrv)){
+            ROS_ERROR("failed to call service getAutoStabilizerParam");
+          }else{
+            if(getSrv.response.i_param.reference_frame[RLEG] != false || getSrv.response.i_param.reference_frame[LLEG] != true || getSrv.response.i_param.is_hand_fix_mode != true){
+              auto_stabilizer::OpenHRP_AutoStabilizerService_setAutoStabilizerParam setSrv;
+              setSrv.request.i_param = getSrv.response.i_param;
+              setSrv.request.i_param.reference_frame[RLEG] = false;
+              setSrv.request.i_param.reference_frame[LLEG] = true;
+              setSrv.request.i_param.is_hand_fix_mode = true;
+              if(!this->setAutoStabilizerParamClient_.call(setSrv)){
+                ROS_ERROR("failed to call service setAutoStabilizerParam");
+              }
+            }
+          }
+        }
+      }else if(this->liftButton_[LLEG]->data){
+        this->state_ = STATE_LIFT_BUTTON_LLEG;
+        {
+          auto_stabilizer::OpenHRP_AutoStabilizerService_getAutoStabilizerParam getSrv;
+          if(!this->getAutoStabilizerParamClient_.call(getSrv)){
+            ROS_ERROR("failed to call service getAutoStabilizerParam");
+          }else{
+            if(getSrv.response.i_param.reference_frame[RLEG] != true || getSrv.response.i_param.reference_frame[LLEG] != false || getSrv.response.i_param.is_hand_fix_mode != true){
+              auto_stabilizer::OpenHRP_AutoStabilizerService_setAutoStabilizerParam setSrv;
+              setSrv.request.i_param = getSrv.response.i_param;
+              setSrv.request.i_param.reference_frame[RLEG] = true;
+              setSrv.request.i_param.reference_frame[LLEG] = false;
+              setSrv.request.i_param.is_hand_fix_mode = true;
+              if(!this->setAutoStabilizerParamClient_.call(setSrv)){
+                ROS_ERROR("failed to call service setAutoStabilizerParam");
+              }
+            }
+          }
+        }
+      }
+
+
+    }else if(this->state_ == STATE_CMDVEL){
+      if((std::abs(this->cmdVel_->linear.x) > 0.05) || (std::abs(this->cmdVel_->linear.y) > 0.05) || (std::abs(this->cmdVel_->angular.z) > 0.05)){
+        {
+          auto_stabilizer::OpenHRP_AutoStabilizerService_getAutoStabilizerParam getSrv;
+          if(!this->getAutoStabilizerParamClient_.call(getSrv)){
+            ROS_ERROR("failed to call service getAutoStabilizerParam");
+          }else{
+            if(getSrv.response.i_param.is_hand_fix_mode != false){
+              auto_stabilizer::OpenHRP_AutoStabilizerService_setAutoStabilizerParam setSrv;
+              setSrv.request.i_param = getSrv.response.i_param;
+              setSrv.request.i_param.is_hand_fix_mode = false;
+              if(!this->setAutoStabilizerParamClient_.call(setSrv)){
+                ROS_ERROR("failed to call service setAutoStabilizerParam");
+              }
+            }
+          }
+        }
+        {
+          auto_stabilizer::OpenHRP_AutoStabilizerService_goVelocity srv;
+          srv.request.vx = std::isfinite(this->cmdVel_->linear.x) ? this->cmdVel_->linear.x : 0;
+          srv.request.vy = std::isfinite(this->cmdVel_->linear.y) ? this->cmdVel_->linear.y : 0;
+          srv.request.vth = std::isfinite(this->cmdVel_->angular.z) ? this->cmdVel_->angular.z : 0;
+          if(!this->goVelocityClient_.call(srv)){
+            ROS_ERROR("failed to call service goVelocity");
+          }
+        }
+      }else{
+        auto_stabilizer::OpenHRP_AutoStabilizerService_goStop srv;
+        if(!this->goStopClient_.call(srv)){
+          ROS_ERROR("failed to call service goStop");
+        }
+        this->state_ = STATE_NORMAL;
+      }
+
+
+    }else if(this->state_ == STATE_HANDFIXED_CMDVEL){
+      if((std::abs(this->handFixedCmdVel_->linear.x) > 0.05) || (std::abs(this->handFixedCmdVel_->linear.y) > 0.05) || (std::abs(this->handFixedCmdVel_->angular.z) > 0.05)){
+        {
+          auto_stabilizer::OpenHRP_AutoStabilizerService_getAutoStabilizerParam getSrv;
+          if(!this->getAutoStabilizerParamClient_.call(getSrv)){
+            ROS_ERROR("failed to call service getAutoStabilizerParam");
+          }else{
+            if(getSrv.response.i_param.is_hand_fix_mode != true){
+              auto_stabilizer::OpenHRP_AutoStabilizerService_setAutoStabilizerParam setSrv;
+              setSrv.request.i_param = getSrv.response.i_param;
+              setSrv.request.i_param.is_hand_fix_mode = true;
+              if(!this->setAutoStabilizerParamClient_.call(setSrv)){
+                ROS_ERROR("failed to call service setAutoStabilizerParam");
+              }
+            }
+          }
+        }
+        auto_stabilizer::OpenHRP_AutoStabilizerService_goVelocity srv;
+        srv.request.vx = std::isfinite(this->handFixedCmdVel_->linear.x) ? this->handFixedCmdVel_->linear.x : 0;
+        srv.request.vy = std::isfinite(this->handFixedCmdVel_->linear.y) ? this->handFixedCmdVel_->linear.y : 0;
+        srv.request.vth = std::isfinite(this->handFixedCmdVel_->angular.z) ? this->handFixedCmdVel_->angular.z : 0;
+        if(!this->goVelocityClient_.call(srv)){
+          ROS_ERROR("failed to call service goVelocity");
+        }
+      }else{
+        auto_stabilizer::OpenHRP_AutoStabilizerService_goStop srv;
+        if(!this->goStopClient_.call(srv)){
+          ROS_ERROR("failed to call service goStop");
+        }
+        this->state_ = STATE_NORMAL;
+      }
+
+
+    }else if(this->state_ == STATE_STEP_BUTTON_RLEG){
+      if(!this->stepButton_[RLEG]->data){
+        auto_stabilizer::OpenHRP_AutoStabilizerService_setFootSteps srv;
+        srv.request.fs.resize(2);
+        srv.request.fs[0] = poseMsgToIdl(this->masterPose_[LLEG]->pose);
+        srv.request.fs[0].leg = "lleg";
+        srv.request.fs[1] = poseMsgToIdl(this->masterPose_[RLEG]->pose);
+        srv.request.fs[1].leg = "rleg";
+        if(!this->setFootStepsClient_.call(srv)){
+          ROS_ERROR("failed to call service setFootSteps");
+        }
+        this->state_ = STATE_NORMAL;
+      }
+
+
+    }else if(this->state_ == STATE_STEP_BUTTON_LLEG){
+      if(!this->stepButton_[LLEG]->data){
+        auto_stabilizer::OpenHRP_AutoStabilizerService_setFootSteps srv;
+        srv.request.fs.resize(2);
+        srv.request.fs[0] = poseMsgToIdl(this->masterPose_[RLEG]->pose);
+        srv.request.fs[0].leg = "rleg";
+        srv.request.fs[1] = poseMsgToIdl(this->masterPose_[LLEG]->pose);
+        srv.request.fs[1].leg = "lleg";
+        if(!this->setFootStepsClient_.call(srv)){
+          ROS_ERROR("failed to call service setFootSteps");
+        }
+        this->state_ = STATE_NORMAL;
+      }
+
+
+    }else if(this->state_ == STATE_LIFT_BUTTON_RLEG){
+      if(!this->liftButton_[RLEG]->data){
+        auto_stabilizer::OpenHRP_AutoStabilizerService_setFootStepsWithParam srv;
+        srv.request.fs.resize(2);
+        srv.request.sps.resize(2);
+        srv.request.fs[0] = poseMsgToIdl(this->masterPose_[LLEG]->pose);
+        srv.request.fs[0].leg = "lleg";
+        srv.request.fs[1] = poseMsgToIdl(this->masterPose_[RLEG]->pose);
+        srv.request.fs[1].leg = "rleg";
+        srv.request.sps[1].step_height = this->config_.step_height;
+        srv.request.sps[1].step_time = this->config_.step_time;
+        srv.request.sps[1].swing_end = true;
+        if(!this->setFootStepsWithParamClient_.call(srv)){
+          ROS_ERROR("failed to call service setFootStepsWithParam");
+        }else{
+          auto_stabilizer::OpenHRP_AutoStabilizerService_waitFootSteps srv;
+          if(!this->waitFootStepsClient_.call(srv)){
+            ROS_ERROR("failed to call service waitFootSteps");
+          }else{
+            auto_stabilizer::OpenHRP_AutoStabilizerService_getAutoStabilizerParam getSrv;
+            if(!this->getAutoStabilizerParamClient_.call(getSrv)){
+              ROS_ERROR("failed to call service getAutoStabilizerParam");
+            }else{
+              if(getSrv.response.i_param.is_manual_control_mode[RLEG] != true || getSrv.response.i_param.is_manual_control_mode[LLEG] != false){
+                auto_stabilizer::OpenHRP_AutoStabilizerService_setAutoStabilizerParam setSrv;
+                setSrv.request.i_param = getSrv.response.i_param;
+                setSrv.request.i_param.is_manual_control_mode[RLEG] = true;
+                setSrv.request.i_param.is_manual_control_mode[LLEG] = false;
+                if(!this->setAutoStabilizerParamClient_.call(setSrv)){
+                  ROS_ERROR("failed to call service setAutoStabilizerParam");
+                }
+              }
+            }
+          }
+        }
+        this->state_ = STATE_NORMAL;
+      }
+
+
+    }else if(this->state_ == STATE_LIFT_BUTTON_LLEG){
+      if(!this->liftButton_[LLEG]->data){
+        auto_stabilizer::OpenHRP_AutoStabilizerService_setFootStepsWithParam srv;
+        srv.request.fs.resize(2);
+        srv.request.sps.resize(2);
+        srv.request.fs[0] = poseMsgToIdl(this->masterPose_[RLEG]->pose);
+        srv.request.fs[0].leg = "rleg";
+        srv.request.fs[1] = poseMsgToIdl(this->masterPose_[LLEG]->pose);
+        srv.request.fs[1].leg = "lleg";
+        srv.request.sps[1].step_height = this->config_.step_height;
+        srv.request.sps[1].step_time = this->config_.step_time;
+        srv.request.sps[1].swing_end = true;
+        if(!this->setFootStepsWithParamClient_.call(srv)){
+          ROS_ERROR("failed to call service setFootStepsWithParam");
+        }else{
+          auto_stabilizer::OpenHRP_AutoStabilizerService_waitFootSteps srv;
+          if(!this->waitFootStepsClient_.call(srv)){
+            ROS_ERROR("failed to call service waitFootSteps");
+          }else{
+            auto_stabilizer::OpenHRP_AutoStabilizerService_getAutoStabilizerParam getSrv;
+            if(!this->getAutoStabilizerParamClient_.call(getSrv)){
+              ROS_ERROR("failed to call service getAutoStabilizerParam");
+            }else{
+              if(getSrv.response.i_param.is_manual_control_mode[RLEG] != false || getSrv.response.i_param.is_manual_control_mode[LLEG] != true){
+                auto_stabilizer::OpenHRP_AutoStabilizerService_setAutoStabilizerParam setSrv;
+                setSrv.request.i_param = getSrv.response.i_param;
+                setSrv.request.i_param.is_manual_control_mode[RLEG] = false;
+                setSrv.request.i_param.is_manual_control_mode[LLEG] = true;
+                if(!this->setAutoStabilizerParamClient_.call(setSrv)){
+                  ROS_ERROR("failed to call service setAutoStabilizerParam");
+                }
+              }
+            }
+          }
+        }
+        this->state_ = STATE_NORMAL;
+      }
+    }
+  }
+
   ros::NodeHandle nh_;
   ros::NodeHandle pnh_ = ros::NodeHandle("~");
 
@@ -188,6 +549,35 @@ protected:
   ros::Timer poseWrenchTimer_;
   ros::CallbackQueue poseWrenchCallbackQueue_;
   std::shared_ptr<ros::AsyncSpinner> poseWrenchSpinner_;
+
+  enum State{
+    STATE_NORMAL,
+    STATE_STEP_BUTTON_RLEG,
+    STATE_LIFT_BUTTON_RLEG,
+    STATE_STEP_BUTTON_LLEG,
+    STATE_LIFT_BUTTON_LLEG,
+    STATE_CMDVEL,
+    STATE_HANDFIXED_CMDVEL
+  } state_ = STATE_NORMAL;
+  std::vector<ros::Subscriber> stepButtonSub_;
+  std::vector<std_msgs::Bool::ConstPtr> stepButton_;
+  std::vector<ros::Subscriber> liftButtonSub_;
+  std::vector<std_msgs::Bool::ConstPtr> liftButton_;
+  ros::Subscriber cmdVelSub_;
+  geometry_msgs::Twist::ConstPtr cmdVel_;
+  ros::Subscriber handFixedCmdVelSub_;
+  geometry_msgs::Twist::ConstPtr handFixedCmdVel_;
+  ros::Timer footstepTimer_;
+  ros::CallbackQueue footstepCallbackQueue_;
+  std::shared_ptr<ros::AsyncSpinner> footstepSpinner_;
+
+  ros::ServiceClient goVelocityClient_;
+  ros::ServiceClient goStopClient_;
+  ros::ServiceClient setFootStepsClient_;
+  ros::ServiceClient setFootStepsWithParamClient_;
+  ros::ServiceClient waitFootStepsClient_;
+  ros::ServiceClient getAutoStabilizerParamClient_;
+  ros::ServiceClient setAutoStabilizerParamClient_;
 };
 
 int main(int argc, char** argv){

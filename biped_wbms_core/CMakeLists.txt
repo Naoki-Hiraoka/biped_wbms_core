@@ -8,7 +8,8 @@ find_package(catkin REQUIRED COMPONENTS
   dynamic_reconfigure
   roscpp
   geometry_msgs
-  cpp_filters)
+  cpp_filters
+  auto_stabilizer)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(EIGEN eigen3)
 
