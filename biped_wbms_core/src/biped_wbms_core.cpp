@@ -6,6 +6,7 @@
 #include <dynamic_reconfigure/server.h>
 #include <biped_wbms_core/BipedWbmsCoreConfig.h>
 #include <cpp_filters/IIRFilter.h>
+#include <cpp_filters/TwoPointInterpolator.h>
 #include <Eigen/Eigen>
 #include <std_msgs/Bool.h>
 #include <geometry_msgs/Twist.h>
@@ -16,6 +17,7 @@
 #include <auto_stabilizer/OpenHRP_AutoStabilizerService_waitFootSteps.h>
 #include <auto_stabilizer/OpenHRP_AutoStabilizerService_getAutoStabilizerParam.h>
 #include <auto_stabilizer/OpenHRP_AutoStabilizerService_setAutoStabilizerParam.h>
+#include <auto_stabilizer/OpenHRP_AutoStabilizerService_getFootStepState.h>
 
 /*
   <独立thread 500Hz>
@@ -75,6 +77,28 @@ auto_stabilizer::OpenHRP_AutoStabilizerService_Footstep poseMsgToIdl(const geome
   return ret;
 }
 
+Eigen::Transform<double, 3, Eigen::AffineCompact> poseMsgToEigen(const geometry_msgs::Pose& msg){
+  Eigen::Transform<double, 3, Eigen::AffineCompact> ret;
+  ret.translation()[0] = msg.position.x;
+  ret.translation()[1] = msg.position.y;
+  ret.translation()[2] = msg.position.z;
+  ret.linear() = Eigen::Quaterniond(msg.orientation.w,msg.orientation.x,msg.orientation.y,msg.orientation.z).toRotationMatrix();
+  return ret;
+};
+
+geometry_msgs::Pose poseEigenToMsg(const Eigen::Transform<double, 3, Eigen::AffineCompact>& eigen){
+  geometry_msgs::Pose ret;
+  ret.position.x = eigen.translation()[0];
+  ret.position.y = eigen.translation()[1];
+  ret.position.z = eigen.translation()[2];
+  Eigen::Quaterniond q(eigen.linear());
+  ret.orientation.w = q.w();
+  ret.orientation.x = q.x();
+  ret.orientation.y = q.y();
+  ret.orientation.z = q.z();
+  return ret;
+};
+
 class BipedWbmsCore {
 public:
   BipedWbmsCore(){
@@ -96,6 +120,10 @@ public:
             this->slaveWrenchLpfForHpf_[i].setParameterAsBiquad(config_in.hpf_cutoff_hz, 1.0/sqrt(2), config_in.rate, this->slaveWrenchLpfForHpf_[i].get());
         if(this->config_.rate != config_in.rate)
           this->poseWrenchTimer_.setPeriod(ros::Duration(1.0 / config_in.rate));
+        if(this->config_.getparam_rate != config_in.getparam_rate)
+          this->getParamTimer_.setPeriod(ros::Duration(1.0 / config_in.getparam_rate));
+        if(this->config_.footstep_rate != config_in.footstep_rate)
+          this->footstepTimer_.setPeriod(ros::Duration(1.0 / config_in.footstep_rate));
 
         this->config_ = config_in;
       }); //setCallbackの中でcallbackが呼ばれる
@@ -107,6 +135,7 @@ public:
     this->waitFootStepsClient_ = this->nh_.serviceClient<auto_stabilizer::OpenHRP_AutoStabilizerService_waitFootSteps>("AutoStabilizerServiceROSBridge/waitFootSteps");
     this->getAutoStabilizerParamClient_ = this->nh_.serviceClient<auto_stabilizer::OpenHRP_AutoStabilizerService_getAutoStabilizerParam>("AutoStabilizerServiceROSBridge/getAutoStabilizerParam");
     this->setAutoStabilizerParamClient_ = this->nh_.serviceClient<auto_stabilizer::OpenHRP_AutoStabilizerService_setAutoStabilizerParam>("AutoStabilizerServiceROSBridge/setAutoStabilizerParam");
+    this->getFootStepStateClient_ = this->nh_.serviceClient<auto_stabilizer::OpenHRP_AutoStabilizerService_getFootStepState>("AutoStabilizerServiceROSBridge/getFootStepState");
 
 
     for(int i=0;i<endeffectors.size();i++){
@@ -155,6 +184,7 @@ public:
     }
 
     for(int i=0;i<endeffectors.size();i++){
+      this->masterPoseFilter_.push_back(cpp_filters::TwoPointInterpolatorSE3(Eigen::Transform<double, 3, Eigen::AffineCompact>::Identity(), Eigen::VectorXd::Zero(6), Eigen::VectorXd::Zero(6), cpp_filters::HOFFARBIB));
       this->masterPosePub_.push_back(this->pnh_.advertise<geometry_msgs::PoseStamped>("master_" + endeffectors[i] + "_pose",1));
       this->slavePosePub_.push_back(this->pnh_.advertise<geometry_msgs::PoseStamped>("slave_" + endeffectors[i] + "_pose",1));
       this->slaveWrenchLpf_.push_back(cpp_filters::IIRFilter<Eigen::VectorXd>());
@@ -170,6 +200,16 @@ public:
     this->poseWrenchTimer_ = this->nh_.createTimer(poseWrenchTimerOption);
     this->poseWrenchSpinner_ = std::make_shared<ros::AsyncSpinner>(1,&(poseWrenchCallbackQueue_));
     this->poseWrenchSpinner_->start();
+
+    for(int i=0;i<NUM_LEGS;i++){
+      this->isManualControlMode_.push_back(false);
+    }
+    ros::TimerOptions getParamTimerOption(ros::Duration(1.0/this->config_.getparam_rate),
+                                            [&](const ros::TimerEvent& event){this->getParamTimerCallBack(event);},
+                                            &(this->getParamCallbackQueue_));
+    this->getParamTimer_ = this->nh_.createTimer(getParamTimerOption);
+    this->getParamSpinner_ = std::make_shared<ros::AsyncSpinner>(1,&(getParamCallbackQueue_));
+    this->getParamSpinner_->start();
 
     for(int i=0;i<NUM_LEGS;i++){
       ros::SubscribeOptions stepButtonSubOption = ros::SubscribeOptions::create<std_msgs::Bool>
@@ -229,7 +269,7 @@ public:
       this->handFixedCmdVel_ = geometry_msgs::Twist::ConstPtr(msg);
     }
 
-    ros::TimerOptions footstepTimerOption(ros::Duration(1.0/this->config_.rate * 10.0),
+    ros::TimerOptions footstepTimerOption(ros::Duration(1.0/this->config_.footstep_rate),
                                           [&](const ros::TimerEvent& event){this->footstepTimerCallBack(event);},
                                           &(this->footstepCallbackQueue_));
     this->footstepTimer_ = this->nh_.createTimer(footstepTimerOption);
@@ -240,22 +280,38 @@ public:
 protected:
   void poseWrenchTimerCallBack(const ros::TimerEvent& event){
     for(int i=0;i<this->masterPose_.size();i++){
-      this->masterPosePub_[i].publish(*(this->masterPose_[i]));
+      Eigen::Transform<double, 3, Eigen::AffineCompact> masterPose;
+      if((i == RLEG && (this->state_ == STATE_STEP_BUTTON_RLEG || this->state_ == STATE_LIFT_BUTTON_RLEG)) ||
+         (i == LLEG && (this->state_ == STATE_STEP_BUTTON_LLEG || this->state_ == STATE_LIFT_BUTTON_LLEG))){
+        masterPose = this->masterPoseFilter_[i].getGoal();
+      }else{
+        masterPose = poseMsgToEigen(this->masterPose_[i]->pose);
+      }
+      if(this->masterPoseFilter_[i].isEmpty()) this->masterPoseFilter_[i].reset(masterPose);
+      else{
+        this->masterPoseFilter_[i].setGoal(poseMsgToEigen(this->masterPose_[i]->pose), this->masterPoseFilter_[i].remain_time());
+        this->masterPoseFilter_[i].interpolate(1.0 / this->config_.rate);
+      }
+      geometry_msgs::PoseStamped msg = *(this->masterPose_[i]);
+      msg.pose = poseEigenToMsg(this->masterPoseFilter_[i].value());
+      this->masterPosePub_[i].publish(msg);
     }
     for(int i=0;i<this->slavePose_.size();i++){
       this->slavePosePub_[i].publish(*(this->slavePose_[i]));
     }
     for(int i=0;i<this->slaveWrench_.size();i++){
-      const Eigen::VectorXd wrench = (Eigen::VectorXd(6) <<
-                                      this->slaveWrench_[i]->wrench.force.x,
-                                      this->slaveWrench_[i]->wrench.force.y,
-                                      this->slaveWrench_[i]->wrench.force.z,
-                                      this->slaveWrench_[i]->wrench.torque.x,
-                                      this->slaveWrench_[i]->wrench.torque.y,
-                                      this->slaveWrench_[i]->wrench.torque.z).finished();
+      Eigen::VectorXd wrench = (Eigen::VectorXd(6) <<
+                                this->slaveWrench_[i]->wrench.force.x,
+                                this->slaveWrench_[i]->wrench.force.y,
+                                this->slaveWrench_[i]->wrench.force.z,
+                                this->slaveWrench_[i]->wrench.torque.x,
+                                this->slaveWrench_[i]->wrench.torque.y,
+                                this->slaveWrench_[i]->wrench.torque.z).finished();
+      if(i<NUM_LEGS && !this->isManualControlMode_[i]) wrench.setZero();
       const Eigen::VectorXd w_hp = wrench - this->slaveWrenchLpfForHpf_[i].passFilter( wrench );
       const Eigen::VectorXd w_lp = this->slaveWrenchLpf_[i].passFilter( wrench );
-      const Eigen::VectorXd w_shaped = wrench * this->config_.gain + w_hp * this->config_.hpf_gain + w_lp * this->config_.lpf_gain;
+      Eigen::VectorXd w_shaped = wrench * this->config_.gain + w_hp * this->config_.hpf_gain + w_lp * this->config_.lpf_gain;
+      if(i<NUM_LEGS && !this->isManualControlMode_[i]) w_shaped.setZero();
 
       geometry_msgs::WrenchStamped msg;
       msg.header = this->slaveWrench_[i]->header;
@@ -269,14 +325,28 @@ protected:
     }
   }
 
+  void getParamTimerCallBack(const ros::TimerEvent& event){
+    auto_stabilizer::OpenHRP_AutoStabilizerService_getFootStepState getSrv;
+    if(!this->getFootStepStateClient_.call(getSrv)){
+      ROS_ERROR("failed to call service getFootStepState");
+    }else{
+      for(int i=0;i<NUM_LEGS;i++){
+        this->isManualControlMode_[i] = getSrv.response.i_param.is_manual_control_mode[i];
+      }
+    }
+  }
+
   void footstepTimerCallBack(const ros::TimerEvent& event){
     if(this->state_ == STATE_NORMAL){
       if((std::abs(this->cmdVel_->linear.x) > 0.05) || (std::abs(this->cmdVel_->linear.y) > 0.05) || (std::abs(this->cmdVel_->angular.z) > 0.05)){
         this->state_ = STATE_CMDVEL;
+        ROS_INFO("STATE_CMDVEL");
       }else if((std::abs(this->handFixedCmdVel_->linear.x) > 0.05) || (std::abs(this->handFixedCmdVel_->linear.y) > 0.05) || (std::abs(this->handFixedCmdVel_->angular.z) > 0.05)){
         this->state_ = STATE_HANDFIXED_CMDVEL;
+        ROS_INFO("STATE_HANDFIXED_CMDVEL");
       }else if(this->stepButton_[RLEG]->data){
         this->state_ = STATE_STEP_BUTTON_RLEG;
+        ROS_INFO("STATE_STEP_BUTTON_RLEG");
         {
           auto_stabilizer::OpenHRP_AutoStabilizerService_getAutoStabilizerParam getSrv;
           if(!this->getAutoStabilizerParamClient_.call(getSrv)){
@@ -295,6 +365,7 @@ protected:
         }
       }else if(this->stepButton_[LLEG]->data){
         this->state_ = STATE_STEP_BUTTON_LLEG;
+        ROS_INFO("STATE_STEP_BUTTON_LLEG");
         {
           auto_stabilizer::OpenHRP_AutoStabilizerService_getAutoStabilizerParam getSrv;
           if(!this->getAutoStabilizerParamClient_.call(getSrv)){
@@ -313,6 +384,7 @@ protected:
         }
       }else if(this->liftButton_[RLEG]->data){
         this->state_ = STATE_LIFT_BUTTON_RLEG;
+        ROS_INFO("STATE_LIFT_BUTTON_RLEG");
         {
           auto_stabilizer::OpenHRP_AutoStabilizerService_getAutoStabilizerParam getSrv;
           if(!this->getAutoStabilizerParamClient_.call(getSrv)){
@@ -332,6 +404,7 @@ protected:
         }
       }else if(this->liftButton_[LLEG]->data){
         this->state_ = STATE_LIFT_BUTTON_LLEG;
+        ROS_INFO("STATE_LIFT_BUTTON_LLEG");
         {
           auto_stabilizer::OpenHRP_AutoStabilizerService_getAutoStabilizerParam getSrv;
           if(!this->getAutoStabilizerParamClient_.call(getSrv)){
@@ -384,6 +457,7 @@ protected:
           ROS_ERROR("failed to call service goStop");
         }
         this->state_ = STATE_NORMAL;
+        ROS_INFO("STATE_NORMAL");
       }
 
 
@@ -417,6 +491,7 @@ protected:
           ROS_ERROR("failed to call service goStop");
         }
         this->state_ = STATE_NORMAL;
+        ROS_INFO("STATE_NORMAL");
       }
 
 
@@ -432,6 +507,7 @@ protected:
           ROS_ERROR("failed to call service setFootSteps");
         }
         this->state_ = STATE_NORMAL;
+        ROS_INFO("STATE_NORMAL");
       }
 
 
@@ -447,6 +523,7 @@ protected:
           ROS_ERROR("failed to call service setFootSteps");
         }
         this->state_ = STATE_NORMAL;
+        ROS_INFO("STATE_NORMAL");
       }
 
 
@@ -486,6 +563,7 @@ protected:
           }
         }
         this->state_ = STATE_NORMAL;
+        ROS_INFO("STATE_NORMAL");
       }
 
 
@@ -525,6 +603,7 @@ protected:
           }
         }
         this->state_ = STATE_NORMAL;
+        ROS_INFO("STATE_NORMAL");
       }
     }
   }
@@ -541,6 +620,7 @@ protected:
   std::vector<geometry_msgs::PoseStamped::ConstPtr> slavePose_;
   std::vector<ros::Subscriber> slaveWrenchSub_;
   std::vector<geometry_msgs::WrenchStamped::ConstPtr> slaveWrench_;
+  std::vector<cpp_filters::TwoPointInterpolatorSE3> masterPoseFilter_;
   std::vector<ros::Publisher> masterPosePub_;
   std::vector<ros::Publisher> slavePosePub_;
   std::vector<cpp_filters::IIRFilter<Eigen::VectorXd> > slaveWrenchLpf_;
@@ -549,6 +629,11 @@ protected:
   ros::Timer poseWrenchTimer_;
   ros::CallbackQueue poseWrenchCallbackQueue_;
   std::shared_ptr<ros::AsyncSpinner> poseWrenchSpinner_;
+
+  std::vector<bool> isManualControlMode_;
+  ros::Timer getParamTimer_;
+  ros::CallbackQueue getParamCallbackQueue_;
+  std::shared_ptr<ros::AsyncSpinner> getParamSpinner_;
 
   enum State{
     STATE_NORMAL,
@@ -578,6 +663,7 @@ protected:
   ros::ServiceClient waitFootStepsClient_;
   ros::ServiceClient getAutoStabilizerParamClient_;
   ros::ServiceClient setAutoStabilizerParamClient_;
+  ros::ServiceClient getFootStepStateClient_;
 };
 
 int main(int argc, char** argv){
