@@ -1,0 +1,3 @@
+- git:
+    uri: https://github.com/Naoki-Hiraoka/cpp_filters
+    local-name: cpp_filters
