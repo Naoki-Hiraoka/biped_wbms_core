@@ -1,3 +1,7 @@
 - git:
     uri: https://github.com/Naoki-Hiraoka/cpp_filters
     local-name: cpp_filters
+
+- git:
+    uri: https://github.com/Naoki-Hiraoka/auto_stabilizer
+    local-name: auto_stabilizer
