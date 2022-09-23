@@ -506,6 +506,7 @@ protected:
         if(!this->setFootStepsClient_.call(srv)){
           ROS_ERROR("failed to call service setFootSteps");
         }
+        this->masterPoseFilter_[RLEG].setGoal(masterPoseFilter_[RLEG].getGoal(), 1.0);
         this->state_ = STATE_NORMAL;
         ROS_INFO("STATE_NORMAL");
       }
@@ -522,6 +523,7 @@ protected:
         if(!this->setFootStepsClient_.call(srv)){
           ROS_ERROR("failed to call service setFootSteps");
         }
+        this->masterPoseFilter_[LLEG].setGoal(masterPoseFilter_[LLEG].getGoal(), 1.0);
         this->state_ = STATE_NORMAL;
         ROS_INFO("STATE_NORMAL");
       }
@@ -562,6 +564,7 @@ protected:
             }
           }
         }
+        this->masterPoseFilter_[RLEG].setGoal(masterPoseFilter_[RLEG].getGoal(), 1.0);
         this->state_ = STATE_NORMAL;
         ROS_INFO("STATE_NORMAL");
       }
@@ -602,6 +605,7 @@ protected:
             }
           }
         }
+        this->masterPoseFilter_[LLEG].setGoal(masterPoseFilter_[LLEG].getGoal(), 1.0);
         this->state_ = STATE_NORMAL;
         ROS_INFO("STATE_NORMAL");
       }
