@@ -193,13 +193,13 @@ public:
 
     for(int i=0;i<endeffectors.size();i++){
       this->masterPoseFilter_.push_back(cpp_filters::TwoPointInterpolatorSE3(Eigen::Transform<double, 3, Eigen::AffineCompact>::Identity(), Eigen::VectorXd::Zero(6), Eigen::VectorXd::Zero(6), cpp_filters::HOFFARBIB));
-      this->masterPosePub_.push_back(this->pnh_.advertise<geometry_msgs::PoseStamped>("master_" + endeffectors[i] + "_pose",1));
-      this->slavePosePub_.push_back(this->pnh_.advertise<geometry_msgs::PoseStamped>("slave_" + endeffectors[i] + "_pose",1));
+      this->masterPosePub_.push_back(this->nh_.advertise<geometry_msgs::PoseStamped>("master_" + endeffectors[i] + "_pose_converted",1));
+      this->slavePosePub_.push_back(this->nh_.advertise<geometry_msgs::PoseStamped>("slave_" + endeffectors[i] + "_pose_converted",1));
       this->slaveWrenchLpf_.push_back(cpp_filters::IIRFilter<Eigen::VectorXd>());
       this->slaveWrenchLpf_.back().setParameterAsBiquad(this->config_.lpf_cutoff_hz, 1.0/std::sqrt(2), config_.rate, Eigen::VectorXd::Zero(6));
       this->slaveWrenchLpfForHpf_.push_back(cpp_filters::IIRFilter<Eigen::VectorXd>());
       this->slaveWrenchLpfForHpf_.back().setParameterAsBiquad(this->config_.hpf_cutoff_hz, 1.0/std::sqrt(2), config_.rate, Eigen::VectorXd::Zero(6));
-      this->slaveWrenchPub_.push_back(this->pnh_.advertise<geometry_msgs::WrenchStamped>("slave_" + endeffectors[i] + "_wrench",1));
+      this->slaveWrenchPub_.push_back(this->pnh_.advertise<geometry_msgs::WrenchStamped>("slave_" + endeffectors[i] + "_wrench_converted",1));
     }
 
     ros::TimerOptions poseWrenchTimerOption(ros::Duration(1.0/this->config_.rate),
@@ -221,7 +221,7 @@ public:
 
     for(int i=0;i<NUM_LEGS;i++){
       ros::SubscribeOptions stepButtonSubOption = ros::SubscribeOptions::create<std_msgs::Bool>
-        ("step_" + endeffectors[i] + "_button",
+        (endeffectors[i] + "_step_button",
          1,
          [&,i](const std_msgs::Bool::ConstPtr& msg){this->stepButton_[i]=msg;},
          ros::VoidPtr(),
@@ -235,7 +235,7 @@ public:
 
     for(int i=0;i<NUM_LEGS;i++){
       ros::SubscribeOptions liftButtonSubOption = ros::SubscribeOptions::create<std_msgs::Bool>
-        ("lift_" + endeffectors[i] + "_button",
+        (endeffectors[i] + "_lift_button",
          1,
          [&,i](const std_msgs::Bool::ConstPtr& msg){this->liftButton_[i]=msg;},
          ros::VoidPtr(),
@@ -285,7 +285,7 @@ public:
          ros::VoidPtr(),
          &(this->footstepCallbackQueue_)
          );
-      this->startStopButtonSub_.push_back(this->nh_.subscribe(startStopButtonSubOption));
+      this->startStopButtonSub_ = this->nh_.subscribe(startStopButtonSubOption);
       std_msgs::Bool* msg = new std_msgs::Bool();
       msg->data = false;
       this->startStopButton_ = this->startStopButtonPrev_ = std_msgs::Bool::ConstPtr(msg);
@@ -362,8 +362,13 @@ protected:
   void footstepTimerCallBack(const ros::TimerEvent& event){
     if(this->state_ == STATE_NORMAL){
       if(!this->startStopButtonPrev_->data && this->startStopButton_->data){
+        this->startStopButtonPrev_ = this->startStopButton_; // これをしないと次の周期でも反応してしまう
         this->state_ = STATE_IDLE;
         ROS_INFO("STATE_IDLE");
+        auto_stabilizer::OpenHRP_AutoStabilizerService_stopWholeBodyMasterSlave srv;
+        if(!this->stopWholeBodyMasterSlaveClient_.call(srv)){
+          ROS_ERROR("failed to call service stopWholeBodyMasterSlave");
+        }
       }else if((std::abs(this->cmdVel_->linear.x) > 0.05) || (std::abs(this->cmdVel_->linear.y) > 0.05) || (std::abs(this->cmdVel_->angular.z) > 0.05)){
         this->state_ = STATE_CMDVEL;
         ROS_INFO("STATE_CMDVEL");
@@ -637,8 +642,13 @@ protected:
       }
     }else if(this->state_ == STATE_IDLE){
       if(!this->startStopButtonPrev_->data && this->startStopButton_->data){
+        this->startStopButtonPrev_ = this->startStopButton_; // これをしないと次の周期でも反応してしまう
         this->state_ = STATE_NORMAL;
         ROS_INFO("STATE_NORMAL");
+        auto_stabilizer::OpenHRP_AutoStabilizerService_startWholeBodyMasterSlave srv;
+        if(!this->startWholeBodyMasterSlaveClient_.call(srv)){
+          ROS_ERROR("failed to call service startWholeBodyMasterSlave");
+        }
       }
     }
   }
@@ -688,6 +698,7 @@ protected:
   geometry_msgs::Twist::ConstPtr cmdVel_;
   ros::Subscriber handFixedCmdVelSub_;
   geometry_msgs::Twist::ConstPtr handFixedCmdVel_;
+  ros::Subscriber startStopButtonSub_;
   std_msgs::Bool::ConstPtr startStopButton_;
   std_msgs::Bool::ConstPtr startStopButtonPrev_;
   ros::Timer footstepTimer_;
