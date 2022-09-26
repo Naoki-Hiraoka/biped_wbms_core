@@ -18,6 +18,8 @@
 #include <auto_stabilizer/OpenHRP_AutoStabilizerService_getAutoStabilizerParam.h>
 #include <auto_stabilizer/OpenHRP_AutoStabilizerService_setAutoStabilizerParam.h>
 #include <auto_stabilizer/OpenHRP_AutoStabilizerService_getFootStepState.h>
+#include <auto_stabilizer/OpenHRP_AutoStabilizerService_startWholeBodyMasterSlave.h>
+#include <auto_stabilizer/OpenHRP_AutoStabilizerService_stopWholeBodyMasterSlave.h>
 
 /*
   <独立thread 500Hz>
@@ -59,6 +61,10 @@
       以後、goVelocityを呼び続ける
     (cmd_vel2がゼロ)になったら、STATE_NORMALに遷移
       遷移時、goStopを呼ぶ
+  STATE_IDLE(STATE_NORMAL時に(button3がfalse->true)になったら至る)
+      遷移時、stopWholeBodyMasterSlaveを呼ぶ
+    (button3がfalse->true)になったら, STATE_NORMALに遷移
+      遷移時、startWholeBodyMasterSlaveを呼ぶ
 */
 
 #define RLEG 0
@@ -136,6 +142,8 @@ public:
     this->getAutoStabilizerParamClient_ = this->nh_.serviceClient<auto_stabilizer::OpenHRP_AutoStabilizerService_getAutoStabilizerParam>("AutoStabilizerServiceROSBridge/getAutoStabilizerParam");
     this->setAutoStabilizerParamClient_ = this->nh_.serviceClient<auto_stabilizer::OpenHRP_AutoStabilizerService_setAutoStabilizerParam>("AutoStabilizerServiceROSBridge/setAutoStabilizerParam");
     this->getFootStepStateClient_ = this->nh_.serviceClient<auto_stabilizer::OpenHRP_AutoStabilizerService_getFootStepState>("AutoStabilizerServiceROSBridge/getFootStepState");
+    this->startWholeBodyMasterSlaveClient_ = this->nh_.serviceClient<auto_stabilizer::OpenHRP_AutoStabilizerService_startWholeBodyMasterSlave>("AutoStabilizerServiceROSBridge/startWholeBodyMasterSlave");
+    this->stopWholeBodyMasterSlaveClient_ = this->nh_.serviceClient<auto_stabilizer::OpenHRP_AutoStabilizerService_stopWholeBodyMasterSlave>("AutoStabilizerServiceROSBridge/stopWholeBodyMasterSlave");
 
 
     for(int i=0;i<endeffectors.size();i++){
@@ -269,6 +277,21 @@ public:
       this->handFixedCmdVel_ = geometry_msgs::Twist::ConstPtr(msg);
     }
 
+    {
+      ros::SubscribeOptions startStopButtonSubOption = ros::SubscribeOptions::create<std_msgs::Bool>
+        ("startstop_button",
+         1,
+         [&](const std_msgs::Bool::ConstPtr& msg){this->startStopButtonPrev_ = this->startStopButton_; this->startStopButton_=msg;},
+         ros::VoidPtr(),
+         &(this->footstepCallbackQueue_)
+         );
+      this->startStopButtonSub_.push_back(this->nh_.subscribe(startStopButtonSubOption));
+      std_msgs::Bool* msg = new std_msgs::Bool();
+      msg->data = false;
+      this->startStopButton_ = this->startStopButtonPrev_ = std_msgs::Bool::ConstPtr(msg);
+    }
+
+
     ros::TimerOptions footstepTimerOption(ros::Duration(1.0/this->config_.footstep_rate),
                                           [&](const ros::TimerEvent& event){this->footstepTimerCallBack(event);},
                                           &(this->footstepCallbackQueue_));
@@ -338,7 +361,10 @@ protected:
 
   void footstepTimerCallBack(const ros::TimerEvent& event){
     if(this->state_ == STATE_NORMAL){
-      if((std::abs(this->cmdVel_->linear.x) > 0.05) || (std::abs(this->cmdVel_->linear.y) > 0.05) || (std::abs(this->cmdVel_->angular.z) > 0.05)){
+      if(!this->startStopButtonPrev_->data && this->startStopButton_->data){
+        this->state_ = STATE_IDLE;
+        ROS_INFO("STATE_IDLE");
+      }else if((std::abs(this->cmdVel_->linear.x) > 0.05) || (std::abs(this->cmdVel_->linear.y) > 0.05) || (std::abs(this->cmdVel_->angular.z) > 0.05)){
         this->state_ = STATE_CMDVEL;
         ROS_INFO("STATE_CMDVEL");
       }else if((std::abs(this->handFixedCmdVel_->linear.x) > 0.05) || (std::abs(this->handFixedCmdVel_->linear.y) > 0.05) || (std::abs(this->handFixedCmdVel_->angular.z) > 0.05)){
@@ -609,6 +635,11 @@ protected:
         this->state_ = STATE_NORMAL;
         ROS_INFO("STATE_NORMAL");
       }
+    }else if(this->state_ == STATE_IDLE){
+      if(!this->startStopButtonPrev_->data && this->startStopButton_->data){
+        this->state_ = STATE_NORMAL;
+        ROS_INFO("STATE_NORMAL");
+      }
     }
   }
 
@@ -646,8 +677,9 @@ protected:
     STATE_STEP_BUTTON_LLEG,
     STATE_LIFT_BUTTON_LLEG,
     STATE_CMDVEL,
-    STATE_HANDFIXED_CMDVEL
-  } state_ = STATE_NORMAL;
+    STATE_HANDFIXED_CMDVEL,
+    STATE_IDLE
+  } state_ = STATE_IDLE;
   std::vector<ros::Subscriber> stepButtonSub_;
   std::vector<std_msgs::Bool::ConstPtr> stepButton_;
   std::vector<ros::Subscriber> liftButtonSub_;
@@ -656,6 +688,8 @@ protected:
   geometry_msgs::Twist::ConstPtr cmdVel_;
   ros::Subscriber handFixedCmdVelSub_;
   geometry_msgs::Twist::ConstPtr handFixedCmdVel_;
+  std_msgs::Bool::ConstPtr startStopButton_;
+  std_msgs::Bool::ConstPtr startStopButtonPrev_;
   ros::Timer footstepTimer_;
   ros::CallbackQueue footstepCallbackQueue_;
   std::shared_ptr<ros::AsyncSpinner> footstepSpinner_;
@@ -668,6 +702,8 @@ protected:
   ros::ServiceClient getAutoStabilizerParamClient_;
   ros::ServiceClient setAutoStabilizerParamClient_;
   ros::ServiceClient getFootStepStateClient_;
+  ros::ServiceClient startWholeBodyMasterSlaveClient_;
+  ros::ServiceClient stopWholeBodyMasterSlaveClient_;
 };
 
 int main(int argc, char** argv){
