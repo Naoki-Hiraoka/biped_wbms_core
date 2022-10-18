@@ -68,7 +68,7 @@
 */
 
 #define RLEG 0
-#define LLEG 0
+#define LLEG 1
 #define NUM_LEGS 2
 
 auto_stabilizer::OpenHRP_AutoStabilizerService_Footstep poseMsgToIdl(const geometry_msgs::Pose& msg){
@@ -281,14 +281,15 @@ public:
       ros::SubscribeOptions startStopButtonSubOption = ros::SubscribeOptions::create<std_msgs::Bool>
         ("startstop_button",
          1,
-         [&](const std_msgs::Bool::ConstPtr& msg){this->startStopButtonPrev_ = this->startStopButton_; this->startStopButton_=msg;},
+         [&](const std_msgs::Bool::ConstPtr& msg){this->startStopButtonPushed_ |= (msg->data && !this->startStopButton_->data); this->startStopButton_=msg;},
          ros::VoidPtr(),
          &(this->footstepCallbackQueue_)
          );
       this->startStopButtonSub_ = this->nh_.subscribe(startStopButtonSubOption);
       std_msgs::Bool* msg = new std_msgs::Bool();
       msg->data = false;
-      this->startStopButton_ = this->startStopButtonPrev_ = std_msgs::Bool::ConstPtr(msg);
+      this->startStopButton_ = std_msgs::Bool::ConstPtr(msg);
+      this->startStopButtonPushed_ = false;
     }
 
 
@@ -361,8 +362,8 @@ protected:
 
   void footstepTimerCallBack(const ros::TimerEvent& event){
     if(this->state_ == STATE_NORMAL){
-      if(!this->startStopButtonPrev_->data && this->startStopButton_->data){
-        this->startStopButtonPrev_ = this->startStopButton_; // これをしないと次の周期でも反応してしまう
+      if(this->startStopButtonPushed_){
+        this->startStopButtonPushed_ = false;
         this->state_ = STATE_IDLE;
         ROS_INFO("STATE_IDLE");
         auto_stabilizer::OpenHRP_AutoStabilizerService_stopWholeBodyMasterSlave srv;
@@ -641,8 +642,8 @@ protected:
         ROS_INFO("STATE_NORMAL");
       }
     }else if(this->state_ == STATE_IDLE){
-      if(!this->startStopButtonPrev_->data && this->startStopButton_->data){
-        this->startStopButtonPrev_ = this->startStopButton_; // これをしないと次の周期でも反応してしまう
+      if(this->startStopButtonPushed_){
+        this->startStopButtonPushed_ = false;
         this->state_ = STATE_NORMAL;
         ROS_INFO("STATE_NORMAL");
         auto_stabilizer::OpenHRP_AutoStabilizerService_startWholeBodyMasterSlave srv;
@@ -700,7 +701,7 @@ protected:
   geometry_msgs::Twist::ConstPtr handFixedCmdVel_;
   ros::Subscriber startStopButtonSub_;
   std_msgs::Bool::ConstPtr startStopButton_;
-  std_msgs::Bool::ConstPtr startStopButtonPrev_;
+  bool startStopButtonPushed_;
   ros::Timer footstepTimer_;
   ros::CallbackQueue footstepCallbackQueue_;
   std::shared_ptr<ros::AsyncSpinner> footstepSpinner_;
