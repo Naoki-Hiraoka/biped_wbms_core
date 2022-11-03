@@ -479,7 +479,6 @@ protected:
             }
           }
         }
-        this->masterPoseFilter_[LLEG].setGoal(masterPoseFilter_[LLEG].getGoal(), 1.0);
         this->state_ = STATE_NORMAL;
         ROS_INFO("STATE_NORMAL");
       }
@@ -499,7 +498,9 @@ protected:
         srv.request.sps[1].swing_end = true;
         if(!this->setFootStepsWithParamClient_.call(srv)){
           ROS_ERROR("failed to call service setFootStepsWithParam");
+          this->masterPoseFilter_[RLEG].setGoal(masterPoseFilter_[RLEG].getGoal(), 1.0);
         }else{
+          this->masterPoseFilter_[RLEG].setGoal(masterPoseFilter_[RLEG].getGoal(), 1.0);
           auto_stabilizer::OpenHRP_AutoStabilizerService_waitFootSteps srv;
           if(!this->waitFootStepsClient_.call(srv)){
             ROS_ERROR("failed to call service waitFootSteps");
@@ -520,7 +521,6 @@ protected:
             }
           }
         }
-        this->masterPoseFilter_[RLEG].setGoal(masterPoseFilter_[RLEG].getGoal(), 1.0);
         this->state_ = STATE_NORMAL;
         ROS_INFO("STATE_NORMAL");
       }
@@ -540,7 +540,9 @@ protected:
         srv.request.sps[1].swing_end = true;
         if(!this->setFootStepsWithParamClient_.call(srv)){
           ROS_ERROR("failed to call service setFootStepsWithParam");
+          this->masterPoseFilter_[LLEG].setGoal(masterPoseFilter_[LLEG].getGoal(), 1.0);
         }else{
+          this->masterPoseFilter_[LLEG].setGoal(masterPoseFilter_[LLEG].getGoal(), 1.0);
           auto_stabilizer::OpenHRP_AutoStabilizerService_waitFootSteps srv;
           if(!this->waitFootStepsClient_.call(srv)){
             ROS_ERROR("failed to call service waitFootSteps");
@@ -561,7 +563,6 @@ protected:
             }
           }
         }
-        this->masterPoseFilter_[LLEG].setGoal(masterPoseFilter_[LLEG].getGoal(), 1.0);
         this->state_ = STATE_NORMAL;
         ROS_INFO("STATE_NORMAL");
       }
