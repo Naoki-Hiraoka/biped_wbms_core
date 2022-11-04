@@ -188,7 +188,7 @@ public:
       this->slaveWrenchLpf_.back().setParameterAsBiquad(this->config_.lpf_cutoff_hz, 1.0/std::sqrt(2), config_.rate, Eigen::VectorXd::Zero(6));
       this->slaveWrenchLpfForHpf_.push_back(cpp_filters::IIRFilter<Eigen::VectorXd>());
       this->slaveWrenchLpfForHpf_.back().setParameterAsBiquad(this->config_.hpf_cutoff_hz, 1.0/std::sqrt(2), config_.rate, Eigen::VectorXd::Zero(6));
-      this->slaveWrenchPub_.push_back(this->pnh_.advertise<geometry_msgs::WrenchStamped>("slave_" + endeffectors[i] + "_wrench_converted",1));
+      this->slaveWrenchPub_.push_back(this->nh_.advertise<geometry_msgs::WrenchStamped>("slave_" + endeffectors[i] + "_wrench_converted",1));
     }
 
     ros::TimerOptions poseWrenchTimerOption(ros::Duration(1.0/this->config_.rate),
