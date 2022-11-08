@@ -296,6 +296,11 @@ protected:
       Eigen::VectorXd w_shaped = wrench * this->config_.gain + w_hp * this->config_.hpf_gain + w_lp * this->config_.lpf_gain;
       if(i<NUM_LEGS && !this->isManualControlMode_[i]) w_shaped.setZero();
 
+      for(int j=0;j<3;j++) {
+        w_shaped[j] = std::min(this->config_.max_force, std::max(-this->config_.max_force, w_shaped[j]));
+        w_shaped[3+j] = std::min(this->config_.max_torque, std::max(-this->config_.max_torque, w_shaped[3+j]));
+      }
+
       geometry_msgs::WrenchStamped msg;
       msg.header = this->slaveWrench_[i]->header;
       msg.wrench.force.x = w_shaped[0];
